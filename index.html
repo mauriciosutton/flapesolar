@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Flap e-Solar</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body { display: flex; align-items: center; justify-content: center; }
+  #game {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    touch-action: manipulation;
+    max-width: 100vw;
+    max-height: 100vh;
+  }
+  #hint {
+    position: fixed;
+    left: 50%; bottom: 10px;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,0.6);
+    font-size: 11px;
+    font-family: system-ui, sans-serif;
+    letter-spacing: 1px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="288" height="512"></canvas>
+<div id="hint">SPACE / CLICK / TAP to flap &nbsp;·&nbsp; P to pause &nbsp;·&nbsp; R to restart</div>
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  const W = 288, H = 512;
+
+  function resize() {
+    const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+    canvas.style.width  = Math.floor(W * s) + "px";
+    canvas.style.height = Math.floor(H * s) + "px";
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---- Images ----
+  const birdImg = new Image();
+  const tubeImg = new Image();
+  birdImg.src = "images/bird.png";
+  tubeImg.src = "images/tube.png";
+
+  // Fraction of tube.png that contains the actual building (skips transparent padding)
+  const TUBE_FX = 0.295, TUBE_FY = 0.07;
+  const TUBE_FW = 0.42,  TUBE_FH = 0.83;
+
+  // ---- Audio ----
+  const bgMusic    = new Audio("audio/coroUfLonshera.mp3");
+  const flapAudio  = new Audio("audio/Eli.mp3");
+  const crashAudio = new Audio("audio/GABAY.mp3");
+  bgMusic.loop = true;
+  // Attempt autoplay — works on localhost or after prior interaction; fails silently otherwise.
+  bgMusic.play().catch(() => {});
+
+  let fadeTimer = null;
+
+  function resumeMusic() {
+    if (fadeTimer) { clearInterval(fadeTimer); fadeTimer = null; }
+    bgMusic.currentTime = 0;
+    bgMusic.volume = 1;
+    bgMusic.play().catch(() => {});
+  }
+
+  function fadeMusic() {
+    if (fadeTimer) clearInterval(fadeTimer);
+    fadeTimer = setInterval(() => {
+      bgMusic.volume = Math.max(0, bgMusic.volume - 0.05);
+      if (bgMusic.volume === 0) {
+        bgMusic.pause();
+        clearInterval(fadeTimer);
+        fadeTimer = null;
+      }
+    }, 50);
+  }
+
+  function playFlap()  { flapAudio.currentTime  = 0; flapAudio.play().catch(() => {}); }
+  function playCrash() { crashAudio.currentTime = 0; crashAudio.play().catch(() => {}); }
+
+  // ---- Procedural background ----
+  function offscreen(w, h) {
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    return c;
+  }
+
+  const bgCanvas = (() => {
+    const c = offscreen(W, H), cx = c.getContext("2d");
+    const g = cx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#4ec0ca"); g.addColorStop(1, "#70c5ce");
+    cx.fillStyle = g; cx.fillRect(0, 0, W, H);
+    cx.fillStyle = "#fff";
+    for (let i = 0; i < 6; i++) {
+      const cx2 = (i * 53 + 20) % W, cy2 = 60 + (i * 17) % 80;
+      cx.beginPath();
+      cx.arc(cx2, cy2, 10, 0, Math.PI * 2);
+      cx.arc(cx2 + 10, cy2 + 2, 8, 0, Math.PI * 2);
+      cx.arc(cx2 - 10, cy2 + 2, 8, 0, Math.PI * 2);
+      cx.fill();
+    }
+    cx.fillStyle = "#5ea44d";
+    cx.beginPath(); cx.moveTo(0, H - 120);
+    for (let x = 0; x <= W; x += 20)
+      cx.lineTo(x, H - 120 - Math.sin(x * 0.05) * 10 - (x * 3) % 7);
+    cx.lineTo(W, H); cx.lineTo(0, H); cx.closePath(); cx.fill();
+    cx.fillStyle = "#74bf4a";
+    for (let x = -10; x < W + 10; x += 24) {
+      cx.beginPath();
+      cx.arc(x + 8, H - 112, 10, 0, Math.PI * 2);
+      cx.arc(x + 18, H - 114, 8, 0, Math.PI * 2);
+      cx.arc(x, H - 114, 8, 0, Math.PI * 2);
+      cx.fill();
+    }
+    return c;
+  })();
+
+  const groundTile = (() => {
+    const tW = 24, tH = 112, c = offscreen(tW, tH), cx = c.getContext("2d");
+    cx.fillStyle = "#ded895"; cx.fillRect(0, 0, tW, tH);
+    cx.fillStyle = "#73bf2e"; cx.fillRect(0, 0, tW, 6);
+    cx.fillStyle = "#4ea517"; cx.fillRect(0, 6, tW, 3);
+    cx.fillStyle = "#c9b96b";
+    for (let y = 14; y < tH; y += 8) cx.fillRect(0, y, tW, 2);
+    cx.strokeStyle = "#b59f4d"; cx.lineWidth = 1;
+    for (let i = -tH; i < tW; i += 8) {
+      cx.beginPath(); cx.moveTo(i, tH); cx.lineTo(i + tH, 10); cx.stroke();
+    }
+    cx.fillStyle = "#73bf2e"; cx.fillRect(0, 0, tW, 6);
+    cx.fillStyle = "#4ea517"; cx.fillRect(0, 6, tW, 3);
+    return c;
+  })();
+
+  // ---- Constants ----
+  const GROUND_Y     = H - 112;
+  const GRAVITY      = 0.38;
+  const FLAP_V       = -6.6;
+  const MAX_VY       = 10;
+  const PIPE_W       = 90;
+  const PIPE_GAP_MAX = 115;
+  const PIPE_GAP_MIN = 75;
+  const PIPE_GAP_STEP = 1.5;
+  const PIPE_SPACING = 205;
+  const SCROLL       = 2.0;
+  const BIRD_W       = 40;
+  const BIRD_H       = 40;
+  const BIRD_R       = 12;
+  const STATE = { MENU: 0, PLAYING: 1, DYING: 2, OVER: 3, PAUSED: 4 };
+
+  // ---- Game state ----
+  const bird = { x: 70, y: H / 2, vy: 0, rot: 0 };
+  let pipes = [], groundX = 0, state = STATE.MENU;
+  let score = 0, best = 0, flashT = 0, shakeT = 0, overSince = 0;
+  try { best = +localStorage.getItem("fb_best") || 0; } catch {}
+
+  function gapForScore(s) {
+    return Math.max(PIPE_GAP_MIN, PIPE_GAP_MAX - s * PIPE_GAP_STEP);
+  }
+
+  function makePipe(x) {
+    const margin = 40;
+    const gap = gapForScore(score);
+    const topH = Math.floor(margin + Math.random() * (GROUND_Y - gap - margin * 2));
+    return { x, topH, gap, passed: false };
+  }
+
+  function spawnPipes() {
+    pipes = [];
+    let x = W + 40;
+    for (let i = 0; i < 4; i++) { pipes.push(makePipe(x)); x += PIPE_SPACING; }
+  }
+
+  function startGame() {
+    spawnPipes();
+    bird.vy = FLAP_V; bird.rot = 0;
+    score = 0; flashT = 0; shakeT = 0; groundX = 0;
+    state = STATE.PLAYING;
+    fadeMusic();
+    playFlap();
+  }
+
+  function resetToMenu() {
+    Object.assign(bird, { x: 70, y: H / 2, vy: 0, rot: 0 });
+    pipes = []; groundX = 0;
+    score = 0; flashT = 0; shakeT = 0;
+    state = STATE.MENU;
+    resumeMusic();
+  }
+
+  // ---- Input ----
+  function flap() {
+    if (state === STATE.MENU) {
+      if (bgMusic.paused) { bgMusic.play().catch(() => {}); return; } // unlock audio first
+      startGame();
+      return;
+    }
+    if (state === STATE.PLAYING) { bird.vy = FLAP_V; playFlap(); return; }
+    if (state === STATE.OVER && performance.now() - overSince > 400) resetToMenu();
+  }
+
+  window.addEventListener("keydown", e => {
+    if (["Space","ArrowUp","KeyW"].includes(e.code)) { e.preventDefault(); flap(); }
+    else if (e.code === "KeyP") {
+      if (state === STATE.PLAYING) state = STATE.PAUSED;
+      else if (state === STATE.PAUSED) state = STATE.PLAYING;
+    } else if (e.code === "KeyR" && state !== STATE.MENU) resetToMenu();
+  });
+  canvas.addEventListener("mousedown",  e => { e.preventDefault(); flap(); });
+  canvas.addEventListener("touchstart", e => { e.preventDefault(); flap(); }, { passive: false });
+
+  // ---- Update ----
+  function circleRect(rx, ry, rw, rh) {
+    const nx = Math.max(rx, Math.min(bird.x, rx + rw));
+    const ny = Math.max(ry, Math.min(bird.y, ry + rh));
+    return (bird.x - nx) ** 2 + (bird.y - ny) ** 2 < BIRD_R ** 2;
+  }
+
+  function die(hitGround) {
+    if (state !== STATE.PLAYING) return;
+    playCrash(); flashT = 6; shakeT = 12;
+    if (hitGround) {
+      state = STATE.OVER; overSince = performance.now();
+      if (score > best) { best = score; try { localStorage.setItem("fb_best", best); } catch {} }
+    } else {
+      state = STATE.DYING; bird.vy = -3;
+    }
+  }
+
+  function update(dt) {
+    if (state === STATE.PAUSED) return;
+
+    if (state === STATE.MENU) {
+      bird.y = H / 2 + Math.sin(performance.now() / 220) * 6;
+      bird.rot = 0;
+      groundX = (groundX - SCROLL * dt) % groundTile.width;
+      return;
+    }
+
+    if (state === STATE.PLAYING) {
+      bird.vy = Math.min(MAX_VY, bird.vy + GRAVITY * dt);
+      bird.y += bird.vy * dt;
+      const tgt = bird.vy < 0 ? -0.5 : Math.min(Math.PI / 2, bird.vy / 10);
+      bird.rot += (tgt - bird.rot) * 0.15 * dt;
+
+      for (const p of pipes) p.x -= SCROLL * dt;
+      while (pipes.length && pipes[0].x + PIPE_W < -10) pipes.shift();
+      while (pipes.length < 5) pipes.push(makePipe(pipes[pipes.length - 1].x + PIPE_SPACING));
+      groundX = (groundX - SCROLL * dt) % groundTile.width;
+
+      for (const p of pipes) {
+        if (!p.passed && p.x + PIPE_W < bird.x - BIRD_R) { p.passed = true; score++; }
+      }
+      if (bird.y + BIRD_R >= GROUND_Y) { bird.y = GROUND_Y - BIRD_R; die(true); return; }
+      if (bird.y - BIRD_R < 0) { bird.y = BIRD_R; bird.vy = 0; }
+      for (const p of pipes) {
+        if (circleRect(p.x, 0, PIPE_W, p.topH) ||
+            circleRect(p.x, p.topH + p.gap, PIPE_W, GROUND_Y - p.topH - p.gap)) {
+          die(false); break;
+        }
+      }
+    }
+
+    if (state === STATE.DYING) {
+      bird.vy = Math.min(MAX_VY, bird.vy + GRAVITY * dt);
+      bird.y += bird.vy * dt;
+      bird.rot = Math.min(Math.PI / 2, bird.rot + 0.15 * dt);
+      if (bird.y + BIRD_R >= GROUND_Y) {
+        bird.y = GROUND_Y - BIRD_R;
+        state = STATE.OVER; overSince = performance.now();
+        if (score > best) { best = score; try { localStorage.setItem("fb_best", best); } catch {} }
+      }
+    }
+
+    flashT = Math.max(0, flashT - dt);
+    shakeT = Math.max(0, shakeT - dt);
+  }
+
+  // ---- Render ----
+  function txt(t, x, y, sz, col) {
+    ctx.save();
+    ctx.font = `bold ${sz}px system-ui, sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.lineWidth = 3; ctx.strokeStyle = "#000"; ctx.strokeText(t, x, y);
+    ctx.fillStyle = col || "#fff"; ctx.fillText(t, x, y);
+    ctx.restore();
+  }
+
+  function panel(x, y, w, h) {
+    ctx.save();
+    ctx.fillStyle = "rgba(12,22,40,0.92)";
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, 8); ctx.fill();
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(x + 1, y + 1, w - 2, h - 2, 8); ctx.stroke();
+    ctx.restore();
+  }
+
+
+  function render() {
+    let ox = 0, oy = 0;
+    if (shakeT > 0) { ox = (Math.random() - 0.5) * 4; oy = (Math.random() - 0.5) * 4; }
+
+    ctx.save();
+    ctx.translate(ox, oy);
+
+    // Background
+    ctx.drawImage(bgCanvas, 0, 0);
+
+    // Pipes — tube.png building sprite, padding cropped so it reaches the edges
+    if (state !== STATE.MENU && tubeImg.complete && tubeImg.naturalWidth) {
+      const nW = tubeImg.naturalWidth, nH = tubeImg.naturalHeight;
+      const sx = nW * TUBE_FX, sy = nH * TUBE_FY;
+      const sw = nW * TUBE_FW, sh = nH * TUBE_FH;
+      for (const p of pipes) {
+        // Top pipe: flipped vertically so solar-panel end faces the gap
+        ctx.save();
+        ctx.translate(p.x, p.topH);
+        ctx.scale(1, -1);
+        ctx.drawImage(tubeImg, sx, sy, sw, sh, 0, 0, PIPE_W, p.topH);
+        ctx.restore();
+        // Bottom pipe: natural orientation, base on the ground, solar panel toward gap
+        const bY = p.topH + p.gap;
+        ctx.drawImage(tubeImg, sx, sy, sw, sh, p.x, bY, PIPE_W, GROUND_Y - bY);
+      }
+    }
+
+    // Ground
+    for (let x = Math.floor(groundX); x < W; x += groundTile.width)
+      ctx.drawImage(groundTile, x, GROUND_Y);
+
+    // Bird
+    if (birdImg.complete && birdImg.naturalWidth) {
+      ctx.save();
+      ctx.translate(bird.x, bird.y);
+      ctx.rotate(bird.rot);
+      ctx.drawImage(birdImg, -BIRD_W / 2, -BIRD_H / 2, BIRD_W, BIRD_H);
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    // Flash on hit
+    if (flashT > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${0.6 * flashT / 6})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // HUD
+    if (state === STATE.MENU) {
+      txt("FLAP e-SOLAR", W / 2, 90, 28, "#ffeb3b");
+      txt("press space to start", W / 2, 145, 13, "#fff");
+      if (best > 0) txt("BEST: " + best, W / 2, 172, 12, "#fff");
+    } else if (state === STATE.PLAYING || state === STATE.DYING) {
+      txt(String(score), W / 2, 40, 28, "#fff");
+    } else if (state === STATE.OVER) {
+      txt(String(score), W / 2, 40, 28, "#fff");
+      const pw = 200, ph = 150, px = (W - pw) / 2, py = (H - ph) / 2 - 20;
+      panel(px, py, pw, ph);
+      txt("GAME OVER", W / 2, py + 14, 20, "#ff4757");
+      txt("Score: " + score, W / 2, py + 56, 14, "#fff");
+      const m = score >= 60 ? "PLATINUM" : score >= 40 ? "GOLD" : score >= 20 ? "SILVER" : score >= 5 ? "BRONZE" : null;
+      if (m) txt("Medal: " + m, W / 2, py + 78, 12, "#ffd54f");
+      txt("Best:  " + best, W / 2, py + 100, 14, "#fff");
+      txt("tap for menu", W / 2, py + ph - 24, 10, "#fff");
+    } else if (state === STATE.PAUSED) {
+      txt("PAUSED", W / 2, H / 2 - 20, 24, "#ffeb3b");
+      txt("press P to resume", W / 2, H / 2 + 10, 12, "#fff");
+    }
+  }
+
+  // ---- Loop ----
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(2.5, (now - last) / (1000 / 60));
+    last = now;
+    update(dt); render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(t => { last = t; loop(t); });
+})();
+</script>
+</body>
+</html>
