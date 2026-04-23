@@ -238,7 +238,7 @@
 
   function gapForScore(s) {
     const bonus = mobileMode ? MOBILE_GAP_BONUS : 0;
-    return Math.max(PIPE_GAP_MIN + bonus, PIPE_GAP_MAX + bonus - s * PIPE_GAP_STEP);
+    return Math.round(Math.max(PIPE_GAP_MIN + bonus, PIPE_GAP_MAX + bonus - s * PIPE_GAP_STEP));
   }
 
   function makePipe(x) {
@@ -246,13 +246,18 @@
     const minTop = 48;
     const maxTop = GROUND_Y - gap - 58;
     const topH = Math.round(minTop + Math.random() * Math.max(1, maxTop - minTop));
-    return { x, topH, gap, passed: false };
+    return { x, topH, gap, passed: false, topSprite: null, bottomSprite: null };
   }
 
   function spawnPipes() {
     pipes = [];
     let x = FIRST_PIPE_X();
-    for (let i = 0; i < 4; i++) { pipes.push(makePipe(x)); x += PIPE_SPACING; }
+    for (let i = 0; i < 4; i++) {
+      const p = makePipe(x);
+      ensurePipeSprites(p);
+      pipes.push(p);
+      x += PIPE_SPACING;
+    }
   }
 
   function startGame() {
@@ -361,7 +366,9 @@
       while (pipes.length && pipes[0].x + PIPE_W < -10) pipes.shift();
       while (pipes.length < 5) {
         const lastX = pipes.length ? pipes[pipes.length - 1].x : FIRST_PIPE_X();
-        pipes.push(makePipe(lastX + PIPE_SPACING));
+        const p = makePipe(lastX + PIPE_SPACING);
+        ensurePipeSprites(p);
+        pipes.push(p);
       }
       groundX = (groundX - SCROLL * dt) % groundTile.width;
 
@@ -447,35 +454,69 @@
     ctx.strokeRect(x - 4, cy, w + 8, capH);
   }
 
-  function drawPipes() {
-    if (state === STATE.MENU) return;
-    const hasTube = tubeImg.complete && tubeImg.naturalWidth;
+  function makeTubeSprite(h, top) {
+    if (h <= 0 || !tubeImg.complete || !tubeImg.naturalWidth) return null;
+    const c = offscreen(PIPE_W, h);
+    const cx = c.getContext("2d");
+    cx.imageSmoothingEnabled = false;
     const nW = tubeImg.naturalWidth, nH = tubeImg.naturalHeight;
     const sx = nW * TUBE_FX, sy = nH * TUBE_FY;
     const sw = nW * TUBE_FW, sh = nH * TUBE_FH;
 
+    if (top) {
+      cx.save();
+      cx.translate(0, h);
+      cx.scale(1, -1);
+      cx.drawImage(tubeImg, sx, sy, sw, sh, 0, 0, PIPE_W, h);
+      cx.restore();
+    } else {
+      cx.drawImage(tubeImg, sx, sy, sw, sh, 0, 0, PIPE_W, h);
+    }
+    return c;
+  }
+
+  function ensurePipeSprites(p) {
+    if (!tubeImg.complete || !tubeImg.naturalWidth) return false;
+    const bY = p.topH + p.gap;
+    if (!p.topSprite) p.topSprite = makeTubeSprite(p.topH, true);
+    if (!p.bottomSprite) p.bottomSprite = makeTubeSprite(GROUND_Y - bY, false);
+    return !!(p.topSprite && p.bottomSprite);
+  }
+
+  function drawPipes() {
+    if (state === STATE.MENU) return;
+    const hasTube = tubeImg.complete && tubeImg.naturalWidth;
+
     for (const p of pipes) {
       const bY = p.topH + p.gap;
-      if (hasTube) {
-        ctx.save();
-        ctx.translate(p.x, p.topH);
-        ctx.scale(1, -1);
-        ctx.drawImage(tubeImg, sx, sy, sw, sh, 0, 0, PIPE_W, p.topH);
-        ctx.restore();
-        ctx.drawImage(tubeImg, sx, sy, sw, sh, p.x, bY, PIPE_W, GROUND_Y - bY);
+      const x = Math.round(p.x);
+      if (hasTube && ensurePipeSprites(p)) {
+        ctx.drawImage(p.topSprite, x, 0);
+        ctx.drawImage(p.bottomSprite, x, bY);
       } else {
-        drawFallbackPipe(p.x, 0, PIPE_W, p.topH, true);
-        drawFallbackPipe(p.x, bY, PIPE_W, GROUND_Y - bY, false);
+        drawFallbackPipe(x, 0, PIPE_W, p.topH, true);
+        drawFallbackPipe(x, bY, PIPE_W, GROUND_Y - bY, false);
       }
     }
   }
 
+  let birdSprite = null;
+  function getBirdSprite() {
+    if (birdSprite || !birdImg.complete || !birdImg.naturalWidth) return birdSprite;
+    birdSprite = offscreen(BIRD_W, BIRD_H);
+    const bx = birdSprite.getContext("2d");
+    bx.imageSmoothingEnabled = false;
+    bx.drawImage(birdImg, 0, 0, BIRD_W, BIRD_H);
+    return birdSprite;
+  }
+
   function drawBird() {
     ctx.save();
-    ctx.translate(bird.x, bird.y);
+    ctx.translate(Math.round(bird.x), Math.round(bird.y));
     ctx.rotate(bird.rot);
-    if (birdImg.complete && birdImg.naturalWidth) {
-      ctx.drawImage(birdImg, -BIRD_W / 2, -BIRD_H / 2, BIRD_W, BIRD_H);
+    const sprite = getBirdSprite();
+    if (sprite) {
+      ctx.drawImage(sprite, -BIRD_W / 2, -BIRD_H / 2);
     } else {
       ctx.fillStyle = "#ffd43b";
       ctx.beginPath();
